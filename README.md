@@ -304,6 +304,28 @@ otherwise each reimplement the window arithmetic and get the division wrong. `co
 *actual elapsed time*, not by the requested period, so a consumer cannot accidentally receive a
 value that is silently scaled up when the accumulator is older than expected.
 
+## Known limitations of the oracle (read before integrating)
+
+Two properties that a reader might assume and that are **not** true. Both are verified by tests in
+`test/Verify.t.sol`.
+
+**`MAX_PERIOD` does not bound the window, only the argument.** `period` is used solely for the
+`elapsed < period` lower-bound check; `elapsed` itself has no upper bound. A consumer that asks for
+60 seconds will silently receive a 30-day average if the accumulator is that stale
+(`test_MaxPeriodDoesNotBoundTheWindow` returns an identical value for `consult(pair, 60)` and
+`consult(pair, 7 days)`). **Integrators must check freshness themselves** — read
+`observations(pair).timestamp` and reject the read if it is too old.
+
+**`update()` is permissionless, which makes a free denial of service possible.** Anyone can call
+`update(pair)` after each pool touch, holding `elapsed` at zero forever and forcing every `consult`
+to revert (`test_PermissionlessUpdateIsAFreeDenialOfService`). This cannot forge a price — the read
+fails rather than returning a wrong value — but it can make the oracle unusable for ~21k gas per
+round. A production deployment should gate `update` behind a keeper allowlist.
+
+**What the oracle does defend against** is atomic manipulation: a single-transaction price move
+contributes zero to the accumulator, so it cannot move the average. An attacker willing to hold a
+bad price for the *entire* window does move it, and no averaging scheme can prevent that.
+
 **Why triangular arbitrage rather than two-pool?** A factory keys pools by the unordered token
 pair, so `A/B` can only ever have one pool. Two-pool arbitrage requires a second venue; a triangle
 is the structure that actually exists inside one factory, and it is what the executor is built for.
