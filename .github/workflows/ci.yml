@@ -40,7 +40,9 @@ jobs:
         run: forge test -vvv
 
       - name: Generate coverage
-        run: forge coverage --report summary --report lcov
+        # `--ir-minimum` is required: `forge coverage` disables via_ir for accuracy, and the
+        # router's ETH paths exceed the legacy pipeline's stack depth without it.
+        run: forge coverage --report summary --report lcov --ir-minimum
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
