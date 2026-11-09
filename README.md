@@ -8,7 +8,7 @@ locally deployed instance.
 [![CI](https://github.com/stayawaycc/amm-dex/actions/workflows/ci.yml/badge.svg)](https://github.com/stayawaycc/amm-dex/actions/workflows/ci.yml)
 ![Solidity](https://img.shields.io/badge/Solidity-0.8.28-363636)
 ![Foundry](https://img.shields.io/badge/Built%20with-Foundry-orange)
-![Tests](https://img.shields.io/badge/tests-86%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-93%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ---
@@ -134,7 +134,8 @@ forge test
 | `TwapOracle.t.sol` | 16 | Window validation, price correctness, atomic-manipulation resistance, sustained-manipulation limits, staleness |
 | `FlashArb.t.sol` | 16 | Authorization guards, triangle validation, profitable execution, lender repayment, residual balance |
 | `Invariant.t.sol` | 5 | Solvency, LP supply integrity, non-zero reserves, cumulative price monotonicity, `k` bounds |
-| **Total** | **86** | **86 passing, 0 failing** |
+| `AuditAmm.t.sol` | 7 | Adversarial probes: `skim` underflow, arb residual sweep, TWAP slot overwrite, fee-on-transfer accounting, router residue, fuzzed `k` |
+| **Total** | **93** | **93 passing, 0 failing** |
 
 ### Coverage
 
