@@ -1,0 +1,43 @@
+# Foundry build artifacts
+out/
+cache/
+broadcast/
+
+# Deployment addresses for the local chain are tracked on purpose: Anvil starts from a fixed
+# nonce for account #0, so a fresh node always reproduces the same addresses. That makes the
+# committed 31337.json valid for anyone who runs `npm run dev:all`, and keeps `npm run build`
+# working without a prior deploy. Other chains stay untracked.
+deployments/*.json
+!deployments/31337.json
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Coverage
+lcov.info
+coverage/
+coverage.json
+
+# Editor and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# Local toolchain binaries (never commit these)
+.toolchain/
