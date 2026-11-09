@@ -59,19 +59,19 @@ contract CallbackProbe is IAmmCallee {
             lastSkimReason = r;
         }
         try pair.sync() { }
-            catch {
+        catch {
             syncReverted = true;
         }
         try pair.mint(attacker) { }
-            catch {
+        catch {
             mintReverted = true;
         }
         try pair.burn(attacker) { }
-            catch {
+        catch {
             burnReverted = true;
         }
         try pair.swap(0, 1, attacker, bytes("")) { }
-            catch {
+        catch {
             swapReverted = true;
         }
 
