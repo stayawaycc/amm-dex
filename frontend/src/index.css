@@ -1,0 +1,47 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #070a14;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+input:focus {
+  border-color: rgba(120, 170, 255, 0.6) !important;
+  box-shadow: 0 0 0 3px rgba(59, 111, 212, 0.18);
+}
+
+::selection {
+  background: rgba(59, 111, 212, 0.4);
+}
+
+/* Thin, dark scrollbar so long traces do not break the visual rhythm. */
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+}

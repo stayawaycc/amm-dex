@@ -1,0 +1,33 @@
+{
+  "name": "amm-dex",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Constant-product AMM with TWAP oracle and flash-swap arbitrage",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config frontend/vite.config.ts",
+    "dev:anvil": "node scripts/anvil.mjs",
+    "dev:deploy": "node scripts/deploy.mjs",
+    "dev:all": "node scripts/dev-all.mjs",
+    "build": "vite build --config frontend/vite.config.ts",
+    "preview": "vite preview --config frontend/vite.config.ts",
+    "typecheck": "tsc --noEmit -p frontend/tsconfig.json",
+    "test": "forge test"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.62.7",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "viem": "^2.21.54",
+    "wagmi": "^2.14.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3"
+  }
+}
