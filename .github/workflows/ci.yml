@@ -109,5 +109,18 @@ jobs:
           ROUTER=$(jq -r .router deployments/31337.json)
           TOKEN_A=$(jq -r .tokenA deployments/31337.json)
           TOKEN_B=$(jq -r .tokenB deployments/31337.json)
-          cast call "$ROUTER" "getAmountsOut(uint256,address[])(uint256[])" \
-            100000000 "[\"$TOKEN_A\",\"$TOKEN_B\"]" --rpc-url http://127.0.0.1:8545
+          echo "router=$ROUTER tokenA=$TOKEN_A tokenB=$TOKEN_B"
+
+          # `cast call` expects an array argument as a bare [a,b] list. JSON quoting inside the
+          # brackets, or space-separated values, both fail to parse.
+          OUT=$(cast call "$ROUTER" "getAmountsOut(uint256,address[])(uint256[])" \
+            100000000 "[$TOKEN_A,$TOKEN_B]" --rpc-url http://127.0.0.1:8545)
+          echo "getAmountsOut -> $OUT"
+          test -n "$OUT"
+
+          # The factory must have indexed the seeded pair, which proves addLiquidity ran.
+          FACTORY=$(cast call "$ROUTER" "factory()(address)" --rpc-url http://127.0.0.1:8545)
+          echo "factory -> $FACTORY"
+          PAIRS=$(cast call "$FACTORY" "allPairsLength()(uint256)" --rpc-url http://127.0.0.1:8545)
+          echo "allPairsLength -> $PAIRS"
+          test "$(echo "$PAIRS" | awk '{print $1}')" -ge 1
