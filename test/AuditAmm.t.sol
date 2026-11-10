@@ -171,8 +171,11 @@ contract AuditAmmTest is Test {
         console2.log("reserve1 after fee-token mint:", r1);
         console2.log("liquidity minted:", liquidity);
 
-        // The reserve must reflect what actually arrived (990), not what was sent (1000).
-        assertLe(r0, 990e18 + 1, "pair credited more than it received");
+        // The reserve of the FEE token must reflect what actually arrived (990), not what
+        // was sent (1000). Which slot it occupies depends on the sorted token addresses,
+        // so resolve it instead of hardcoding r0.
+        uint256 feeReserve = address(pair.token0()) == address(feeToken) ? r0 : r1;
+        assertLe(feeReserve, 990e18 + 1, "pair credited more than it received");
         assertGt(liquidity, 0);
     }
 
