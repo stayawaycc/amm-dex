@@ -74,6 +74,7 @@ contract AuditAmmTest is Test {
 
     address internal alice = makeAddr("alice");
     address internal attacker = makeAddr("attacker");
+    address internal keeper = makeAddr("keeper");
 
     /// @dev The router refunds unused ETH to msg.sender, so a test contract that calls the ETH
     ///      paths must be able to receive it.
@@ -109,8 +110,9 @@ contract AuditAmmTest is Test {
         tokenC.approve(address(router), type(uint256).max);
         vm.stopPrank();
 
-        // The probes below act from the test contract itself, so it needs its own funding and
-        // approvals. Using `this` rather than a pranked EOA keeps the assertions readable.
+        // The probes act as a stranger; hand the keeper role to a neutral party so
+        // permission changes are observable.
+        oracle.setKeeper(keeper);
         tokenA.mint(address(this), 1_000_000e18);
         tokenB.mint(address(this), 1_000_000e18);
         tokenC.mint(address(this), 1_000_000e18);
@@ -137,8 +139,9 @@ contract AuditAmmTest is Test {
         pair.mint(address(this));
 
         // Simulate a rebase-down: shrink the pair's real balance below its cached reserve.
-        // MockERC20.burn(from, amount) is permissionless, which is exactly what makes this
-        // representable without a real rebasing token.
+        // Post-C-1 the pair itself is the only address allowed to burn its own balance,
+        // which is exactly how a real rebasing token would produce the deficit.
+        vm.prank(address(pair));
         tokenA.burn(address(pair), 100e18);
 
         vm.expectRevert();
@@ -177,11 +180,12 @@ contract AuditAmmTest is Test {
     // Probe 3: FlashArbExecutor residual balance is stealable
     // =====================================================================
 
-    /// @notice `execute` treats its entire tokenA balance as profit. Any tokenA sitting in the
-    ///         executor beforehand is paid out to `profitRecipient` on the next call.
-    /// @dev Whether this is a bug depends on intent, but it is a real property worth stating: the
-    ///      contract has no way to distinguish its own dust from a stranger's transfer.
-    function test_ArbSweepsPreExistingBalanceAsProfit() public {
+    /// @notice `execute` reports only its own balance delta as profit. Post-fix a tokenA
+    ///         balance sitting in the executor beforehand stays there and is NOT paid out
+    ///         to `profitRecipient`.
+    /// @dev Pre-fix the whole balance was treated as profit, so a stranger's transfer was
+    ///      swept to the recipient on the next arb; the balance delta closes that.
+    function test_ArbDoesNotSweepPreExistingBalanceAsProfit() public {
         // Three balanced pools.
         vm.startPrank(alice);
         router.addLiquidity(address(tokenA), address(tokenB), 10_000e18, 10_000e18, 0, 0, alice, block.timestamp);
@@ -210,9 +214,9 @@ contract AuditAmmTest is Test {
         console2.log("profit reported:", profit);
         console2.log("tokenA actually received by recipient:", received);
 
-        // The reported profit includes the stranger's 777 that was never earned.
-        assertGt(profit, 777e18, "pre-existing balance was swept into the reported profit");
-        assertEq(tokenA.balanceOf(address(arb)), 0, "executor emptied");
+        // The reported profit is only the arb's own earnings; the stray 777 stays put.
+        assertLt(profit, 777e18, "pre-existing balance must not be swept into the reported profit");
+        assertEq(tokenA.balanceOf(address(arb)), 777e18, "stray tokens stay in the executor");
     }
 
     // =====================================================================
@@ -223,12 +227,15 @@ contract AuditAmmTest is Test {
     ///         oracle's stored snapshot is at the mercy of whoever last touched it.
     /// @dev The design intends callers to manage their own window, but the shared single-slot
     ///      storage makes concurrent consumers step on each other.
-    function test_AnyoneCanOverwriteObservation() public {
+    function test_StrangerCannotOverwriteObservation() public {
         AmmPair pair = AmmPair(factory.createPair(address(tokenA), address(tokenB)));
         tokenA.transfer(address(pair), 10_000e18);
         tokenB.transfer(address(pair), 10_000e18);
         pair.mint(address(this));
 
+        // The audit contract created this oracle, so it is the keeper; the role was already
+        // handed to the neutral `keeper` in setUp, so the update below is the keeper's.
+        vm.prank(keeper);
         oracle.update(address(pair));
         (,, uint32 firstTs) = oracle.observations(address(pair));
 
@@ -236,16 +243,13 @@ contract AuditAmmTest is Test {
         pair.sync();
 
         vm.prank(attacker);
+        vm.expectRevert("TwapOracle: FORBIDDEN");
         oracle.update(address(pair));
         (,, uint32 secondTs) = oracle.observations(address(pair));
 
-        assertGt(secondTs, firstTs, "observation was overwritten by an arbitrary caller");
+        assertEq(secondTs, firstTs, "a stranger must not be able to overwrite the observation");
         console2.log("first observation ts :", firstTs);
         console2.log("second observation ts:", secondTs);
-
-        // A consumer that recorded `firstTs` and now reads the shared slot cannot compute its window.
-        vm.expectRevert();
-        oracle.consult(address(pair), 600);
     }
 
     // =====================================================================

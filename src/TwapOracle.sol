@@ -39,24 +39,45 @@ contract TwapOracle {
 
     address public immutable factory;
 
+    /// @notice Address allowed to call {update} for any pair.
+    /// @dev A permissionless {update} lets anyone re-anchor the observation slot right after
+    ///      manipulating a pool, which (a) publishes the attacker's spot price with zero
+    ///      dilution and (b) holds `elapsed` at zero forever, denying every consumer at
+    ///      ~21k gas per round. Gating the writer closes both; see test/SecurityFixes.t.sol.
+    address public keeper;
+
     /// @notice Last snapshot per pair, written by `update`.
     mapping(address => Observation) public observations;
 
     event Updated(address indexed pair, uint256 price0Cumulative, uint256 price1Cumulative, uint32 timestamp);
+    event KeeperUpdated(address indexed previousKeeper, address indexed newKeeper);
 
     error PeriodOutOfRange(uint32 period);
     error NoObservation(address pair);
     error WindowNotElapsed(address pair, uint32 elapsed, uint32 period);
+    error StaleWindow(address pair, uint32 elapsed);
 
     constructor(address factory_) {
         require(factory_ != address(0), "TwapOracle: ZERO_ADDRESS");
         factory = factory_;
+        keeper = msg.sender;
+        emit KeeperUpdated(address(0), keeper);
+    }
+
+    function setKeeper(address newKeeper) external {
+        require(msg.sender == keeper, "TwapOracle: FORBIDDEN");
+        require(newKeeper != address(0), "TwapOracle: ZERO_ADDRESS");
+        emit KeeperUpdated(keeper, newKeeper);
+        keeper = newKeeper;
     }
 
     /// @notice Records the current cumulative prices of a pair.
     /// @dev Must be called at least once per `period` by whoever relies on the average, and the
-    ///      first call must happen at least `period` seconds before the first read.
+    ///      first call must happen at least `period` seconds before the first read. Restricted
+    ///      to the keeper: the observation table is a single slot per pair, so a permissionless
+    ///      writer chooses the start of every averaging window.
     function update(address pair) external returns (Observation memory obs) {
+        require(msg.sender == keeper, "TwapOracle: FORBIDDEN");
         (uint256 price0, uint256 price1, uint32 ts) = _snapshot(pair);
         obs = Observation({ price0Cumulative: price0, price1Cumulative: price1, timestamp: ts });
         observations[pair] = obs;
@@ -106,6 +127,10 @@ contract TwapOracle {
         uint32 end = tsNow < uint32(block.timestamp) ? tsNow : uint32(block.timestamp);
         uint32 elapsed = end - obs.timestamp;
         if (elapsed < period) revert WindowNotElapsed(pair, elapsed, period);
+        // Upper bound on the *actual* window: a consumer asking for a fresh average must not
+        // silently receive a month-old one. The bound is inclusive so a window of exactly
+        // MAX_PERIOD still reads. Before this check the accumulator's age was unlimited.
+        if (elapsed > MAX_PERIOD) revert StaleWindow(pair, elapsed);
 
         unchecked {
             if (zeroForOne) {

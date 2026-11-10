@@ -180,7 +180,7 @@ export function OraclePanel() {
         disabled={!isConnected || !hasPair || isPending}
         onClick={handleUpdate}
       >
-        {isPending ? "等待确认…" : isConfirming ? "上链中…" : "刷新观察快照"}
+        {isPending ? "等待确认…" : isConfirming ? "上链中…" : "刷新观察快照（仅 keeper）"}
       </button>
 
       {hash && (
@@ -193,7 +193,9 @@ export function OraclePanel() {
 
       <div style={styles.hint}>
         最小窗口 {minPeriod !== undefined ? String(minPeriod) : "60"} 秒。累积价格只有在池子被触碰时才会推进，
-        因此第一次读取前必须先调用 <code style={styles.mono}>update</code> 并等待至少一个完整窗口。
+        因此第一次读取前必须先由 keeper 调用 <code style={styles.mono}>update</code> 并等待至少一个完整窗口。
+        出于安全考虑（无权限的 update 可被用来重锚观察窗口、永久拒绝服务），update 已收敛为 keeper 专属——
+        本地演示部署中 keeper 即部署者账户，切换到其他钱包时该按钮会失败，这是预期行为。
         预言机地址 <span style={styles.mono}>{shortAddress(addresses.oracle)}</span>。
       </div>
     </div>

@@ -50,9 +50,10 @@ contract VerifyTest is Test {
     // =====================================================================
 
     /// @notice Can an attacker publish a manipulated TWAP *without* holding the price for `period`?
-    /// @dev This is the exact claim the Critical label rests on. If the answer is "no, they must
-    ///      hold for the full period", then C-1 is the sustained-manipulation case already
-    ///      documented in the README, not a zero-cost oracle break.
+    /// @dev This is the exact claim the Critical label rested on. Post-fix the reset itself is
+    ///      refused: only the keeper may re-anchor the window. The attacker's dump owns zero
+    ///      seconds of the window, so the oracle keeps publishing the honest price; only after
+    ///      holding the crushed price for a full extra window does the average move.
     function test_ResetDoesNotRemoveTheHoldingRequirement() public {
         AmmPair pair = AmmPair(factory.createPair(address(tokenA), address(tokenB)));
         tokenA.transfer(address(pair), 10_000e18);
@@ -61,12 +62,12 @@ contract VerifyTest is Test {
 
         uint32 period = 600;
 
-        // Baseline observation.
+        // Baseline observation right after seeding, so the window starts clean.
         oracle.update(address(pair));
         vm.warp(block.timestamp + period);
         pair.sync();
 
-        // Attacker crashes the price.
+        // Attacker crashes the price in the same block as the sync: zero seconds of window.
         vm.startPrank(attacker);
         tokenA.transfer(address(pair), 5_000_000e18);
         (uint112 r0, uint112 r1,) = pair.getReserves();
@@ -74,37 +75,43 @@ contract VerifyTest is Test {
         pair.swap(0, out, attacker, new bytes(0));
         vm.stopPrank();
 
-        uint256 crushedSpot = _spot0(pair);
+        // The manipulated price actually sitting in the accumulator: the honest accumulator
+        // before the crash was exactly `honest * elapsed`, so the per-second leg after the
+        // dump is what the attacker wants the oracle to publish.
+        uint256 honest = uint256(1) << 112;
 
         // *** The attack: reset the observation immediately after the crash ***
+        // Post-fix this is refused outright.
         vm.prank(attacker);
+        vm.expectRevert("TwapOracle: FORBIDDEN");
         oracle.update(address(pair));
 
-        // Attempt to read the manipulated price RIGHT NOW, with zero holding time.
-        // If C-1 were a zero-cost break, this would return the crushed price.
-        vm.expectRevert();
-        oracle.consult(address(pair), period);
+        // The window is untouched, so the published average is still the honest 1:1 price.
+        uint256 published = oracle.consult(address(pair), period);
+        emit log_named_uint("published TWAP ", published);
+        assertApproxEqRel(published, honest, 0.001e18, "the atomic dump must not move the TWAP");
 
-        // The read is refused, not poisoned. Now hold the price for the full period and retry.
+        // Only after holding the manipulated price for a full extra window does it start to
+        // count: the window is then 1200 s, half honest, half manipulated -> midpoint.
+        uint256 accBefore = pair.price0CumulativeLast();
         vm.warp(block.timestamp + period);
         pair.sync();
-
-        uint256 published = oracle.consult(address(pair), period);
-
-        emit log_named_uint("crushed spot   ", crushedSpot);
-        emit log_named_uint("published TWAP ", published);
-
-        // The attacker only succeeds after paying the full holding cost.
-        assertApproxEqRel(published, crushedSpot, 0.01e18, "price is manipulated after holding");
+        // The manipulated price that actually sat in the accumulator for that window.
+        uint256 manipLeg0 = (pair.price0CumulativeLast() - accBefore) / period;
+        uint256 diluted = oracle.consult(address(pair), period);
+        emit log_named_uint("manipulated leg", manipLeg0);
+        emit log_named_uint("diluted TWAP   ", diluted);
+        assertApproxEqRel(diluted, (honest + manipLeg0) / 2, 0.02e18, "sustained holding moves it halfway");
     }
 
     // =====================================================================
     // F1b: is the free DoS real?
     // =====================================================================
 
-    /// @notice The strongest claim in the report: an attacker can keep `consult` reverting forever
-    ///         at zero cost. Verify it independently.
-    function test_PermissionlessUpdateIsAFreeDenialOfService() public {
+    /// @notice The strongest claim in the original report was that an attacker could keep `consult`
+    ///         reverting forever at zero cost. Post-fix the keeper gate blocks every hostile
+    ///         poke, so the DoS is no longer reachable.
+    function test_KeeperGateEndsTheFreeDenialOfService() public {
         AmmPair pair = AmmPair(factory.createPair(address(tokenA), address(tokenB)));
         tokenA.transfer(address(pair), 10_000e18);
         tokenB.transfer(address(pair), 10_000e18);
@@ -112,26 +119,25 @@ contract VerifyTest is Test {
 
         oracle.update(address(pair));
 
-        // Ten rounds of legitimate activity, each followed by an attacker reset.
+        // Ten rounds of legitimate activity, each followed by an attempted attacker reset.
         for (uint256 i; i < 10; ++i) {
             vm.warp(block.timestamp + 3600);
             pair.sync();
+            vm.expectRevert("TwapOracle: FORBIDDEN");
             vm.prank(attacker);
             oracle.update(address(pair));
         }
 
-        // Every consumer is now permanently locked out: elapsed is always ~0.
-        vm.expectRevert();
-        oracle.consult(address(pair), 60);
-
-        emit log_string("confirmed: a permissionless update() can hold elapsed at 0 indefinitely");
+        // Consumers keep reading: the window was never re-anchored.
+        uint256 price = oracle.consult(address(pair), 60);
+        assertApproxEqRel(price, uint256(1) << 112, 0.01e18, "the DoS is closed");
     }
 
     // =====================================================================
     // C-2: is MockERC20.burn really unguarded, and does it reach the demo deployment?
     // =====================================================================
 
-    function test_BurnIsUnguardedOnTheDeployedDemoToken() public {
+    function test_DemoTokenBurnIsGuardedAfterTheFix() public {
         AmmPair pair = AmmPair(factory.createPair(address(tokenA), address(tokenB)));
         tokenA.transfer(address(pair), 10_000e18);
         tokenB.transfer(address(pair), 10_000e18);
@@ -140,17 +146,15 @@ contract VerifyTest is Test {
         uint256 pairBalance = tokenA.balanceOf(address(pair));
         assertEq(pairBalance, 10_000e18);
 
-        // Anyone can burn anyone's balance.
+        // Post-fix the demo token only lets an address burn its own balance.
         vm.prank(attacker);
+        vm.expectRevert("MockERC20: FORBIDDEN");
         tokenA.burn(address(pair), pairBalance);
 
-        assertEq(tokenA.balanceOf(address(pair)), 0, "attacker wiped the pair balance");
+        assertEq(tokenA.balanceOf(address(pair)), pairBalance, "the pool balance is untouched");
 
         (uint112 r0,,) = pair.getReserves();
-        emit log_named_uint("reserve0 still claims", r0);
-        emit log_named_uint("actual balance       ", tokenA.balanceOf(address(pair)));
-
-        assertGt(r0, 0, "reserve is now a lie");
+        assertEq(uint256(r0), pairBalance, "reserve and balance still agree");
     }
 
     // =====================================================================
@@ -167,23 +171,18 @@ contract VerifyTest is Test {
         vm.warp(block.timestamp + 30 days);
         pair.sync();
 
-        uint256 shortPeriod = oracle.consult(address(pair), 60);
-        uint256 longPeriod = oracle.consult(address(pair), 7 days);
+        // Post-fix the window itself is bounded: a 30-day-old accumulator is refused
+        // outright for every requested period.
+        vm.expectRevert(abi.encodeWithSelector(TwapOracle.StaleWindow.selector, address(pair), uint32(30 days)));
+        oracle.consult(address(pair), 60);
 
-        emit log_named_uint("consult(60s)  ", shortPeriod);
-        emit log_named_uint("consult(7days)", longPeriod);
-
-        assertEq(shortPeriod, longPeriod, "period does not change the window: MAX_PERIOD is advisory only");
+        vm.expectRevert(abi.encodeWithSelector(TwapOracle.StaleWindow.selector, address(pair), uint32(30 days)));
+        oracle.consult(address(pair), 7 days);
     }
 
     // =====================================================================
     // Helpers
     // =====================================================================
-
-    function _spot0(AmmPair pair) internal view returns (uint256) {
-        (uint112 r0, uint112 r1,) = pair.getReserves();
-        return (uint256(r1) << 112) / r0;
-    }
 
     receive() external payable { }
 }

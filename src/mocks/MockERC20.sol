@@ -21,6 +21,11 @@ contract MockERC20 is ERC20 {
     }
 
     function burn(address from, uint256 amount) external {
+        // Tests and fixtures use `burn(address(this), ...)` to simulate rebases and deficits;
+        // anyone else must only be able to destroy their own balance. The deploy script ships
+        // this token as the demo dBTC/dUSDC, so an unguarded burn meant anyone could wipe the
+        // pair's real balance while its cached reserves still claimed the full amount.
+        require(msg.sender == from, "MockERC20: FORBIDDEN");
         _burn(from, amount);
     }
 }

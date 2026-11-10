@@ -8,7 +8,7 @@ locally deployed instance.
 [![CI](https://github.com/stayawaycc/amm-dex/actions/workflows/ci.yml/badge.svg)](https://github.com/stayawaycc/amm-dex/actions/workflows/ci.yml)
 ![Solidity](https://img.shields.io/badge/Solidity-0.8.28-363636)
 ![Foundry](https://img.shields.io/badge/Built%20with-Foundry-orange)
-![Tests](https://img.shields.io/badge/tests-93%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-128%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ---
@@ -134,8 +134,11 @@ forge test
 | `TwapOracle.t.sol` | 16 | Window validation, price correctness, atomic-manipulation resistance, sustained-manipulation limits, staleness |
 | `FlashArb.t.sol` | 16 | Authorization guards, triangle validation, profitable execution, lender repayment, residual balance |
 | `Invariant.t.sol` | 5 | Solvency, LP supply integrity, non-zero reserves, cumulative price monotonicity, `k` bounds |
+| `Audit.t.sol` | 20 | Post-audit adversarial probes: oracle window ownership, DoS attempts, token-burn resilience, arb balance handling |
 | `AuditAmm.t.sol` | 7 | Adversarial probes: `skim` underflow, arb residual sweep, TWAP slot overwrite, fee-on-transfer accounting, router residue, fuzzed `k` |
-| **Total** | **93** | **93 passing, 0 failing** |
+| `Verify.t.sol` | 4 | Independent re-verification of every severity claim attached to the audit findings |
+| `SecurityFixes.t.sol` | 11 | Regression tests for the five post-audit fixes (oracle keeper gate, stale-window bound, arb profit basis, zero-reserve mint, mock burn auth) |
+| **Total** | **128** | **128 passing, 0 failing** |
 
 ### Coverage
 
@@ -306,25 +309,37 @@ value that is silently scaled up when the accumulator is older than expected.
 
 ## Known limitations of the oracle (read before integrating)
 
-Two properties that a reader might assume and that are **not** true. Both are verified by tests in
-`test/Verify.t.sol`.
+Two findings from the adversarial audit round were **fixed**; the third property below is the
+irreducible limit of any averaging oracle and is stated rather than hidden. All three are
+verified by tests in `test/Verify.t.sol` and `test/SecurityFixes.t.sol`.
 
-**`MAX_PERIOD` does not bound the window, only the argument.** `period` is used solely for the
-`elapsed < period` lower-bound check; `elapsed` itself has no upper bound. A consumer that asks for
-60 seconds will silently receive a 30-day average if the accumulator is that stale
-(`test_MaxPeriodDoesNotBoundTheWindow` returns an identical value for `consult(pair, 60)` and
-`consult(pair, 7 days)`). **Integrators must check freshness themselves** — read
-`observations(pair).timestamp` and reject the read if it is too old.
+**`update()` is keeper-gated.** The observation table is a single slot per pair, so a
+permissionless writer chooses the start of every averaging window. Measured pre-fix: one
+`update` right after a price dump re-anchored the window and republished the attacker's spot
+price with the honest history diluted out of the average, and one `update` after each pool
+touch held `elapsed` at zero forever, denying every consumer at ~21k gas per round
+(both scenarios are preserved in the audit history; the fixed behaviour is asserted in
+`test/SecurityFixes.t.sol`). `update` is now restricted to a `keeper` (settable by the
+keeper, set to the deployer in `script/Deploy.s.sol`). Note the liveness trade-off: there is
+a single keeper and a one-step `setKeeper`, so if the keeper disappears for more than
+`MAX_PERIOD` without anyone re-anchoring, `consult` reverts with `StaleWindow` until a new
+keeper is appointed. Production deployments should transfer the role before retiring the
+current keeper.
 
-**`update()` is permissionless, which makes a free denial of service possible.** Anyone can call
-`update(pair)` after each pool touch, holding `elapsed` at zero forever and forcing every `consult`
-to revert (`test_PermissionlessUpdateIsAFreeDenialOfService`). This cannot forge a price — the read
-fails rather than returning a wrong value — but it can make the oracle unusable for ~21k gas per
-round. A production deployment should gate `update` behind a keeper allowlist.
+**The actual window is bounded by `MAX_PERIOD`.** `period` is the lower bound a consumer
+requests; `elapsed` is the window actually served. Pre-fix a consumer asking for 60 seconds
+silently received a 30-day average when the accumulator was that stale (`consult(pair, 60)`
+and `consult(pair, 7 days)` returned identical values). `consult` now reverts with
+`StaleWindow` when `elapsed > MAX_PERIOD`; the bound is inclusive, so a window of exactly
+7 days still reads.
 
-**What the oracle does defend against** is atomic manipulation: a single-transaction price move
-contributes zero to the accumulator, so it cannot move the average. An attacker willing to hold a
-bad price for the *entire* window does move it, and no averaging scheme can prevent that.
+**What the oracle still defends against** is atomic manipulation: a single-transaction price
+move contributes zero to the accumulator, so it cannot move the average
+(`test_Manipulation_SpotPriceMovesButTwapDoesNot`). An attacker willing to hold a bad price
+for the *entire* window does move it, and no averaging scheme can prevent that
+(`test_Manipulation_SustainedPriceMovesTwap`). This is why `MIN_PERIOD` is a floor, not an
+endorsement, and why integrators should choose a window longer than the cost of sustaining a
+manipulation.
 
 **Why triangular arbitrage rather than two-pool?** A factory keys pools by the unordered token
 pair, so `A/B` can only ever have one pool. Two-pool arbitrage requires a second venue; a triangle
@@ -332,6 +347,14 @@ is the structure that actually exists inside one factory, and it is what the exe
 
 **Why `via_ir = true`?** The router's ETH paths exceed the legacy pipeline's stack depth. `via_ir`
 resolves it at the cost of slower compiles (~10s for a clean build, which is acceptable).
+
+## Demo tokens are NOT production tokens
+
+`script/Deploy.s.sol` ships `MockERC20` as the demo dBTC/dUSDC pair. `MockERC20.mint` is
+permissionless and `MockERC20.burn(from, amount)` only checks `msg.sender == from` — there is
+no owner, no allowance and no pausability. **Never deploy these mocks to any real network or
+use them for anything with value.** A production deployment must use a real token contract
+with a proper permission model.
 
 ---
 

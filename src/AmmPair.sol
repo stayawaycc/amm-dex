@@ -131,6 +131,10 @@ contract AmmPair is IAmmPair, ERC20 {
             liquidity = Math.sqrt(amount0 * amount1) - MINIMUM_LIQUIDITY;
             _mint(address(0xdead), MINIMUM_LIQUIDITY);
         } else {
+            // A zero cached reserve with a live supply means one side was drained outside the
+            // pair's accounting (rebase-down token, burn, ...). Fail here, loudly, instead of
+            // panicking with a division-by-zero below.
+            require(_reserve0 > 0 && _reserve1 > 0, "AmmPair: ZERO_RESERVE");
             liquidity = Math.min((amount0 * _totalSupply) / _reserve0, (amount1 * _totalSupply) / _reserve1);
         }
         require(liquidity > 0, "AmmPair: INSUFFICIENT_LIQUIDITY_MINTED");

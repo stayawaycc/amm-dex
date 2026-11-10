@@ -48,6 +48,8 @@ contract Deploy is Script {
         d.weth = address(new WETH9());
         d.factory = address(new AmmFactory(deployer));
         d.router = address(new AmmRouter(d.factory, d.weth));
+        // TwapOracle's constructor sets keeper = msg.sender, so the deployer is already the
+        // keeper; the demo frontend's "refresh observation" button works out of the box.
         d.oracle = address(new TwapOracle(d.factory));
         d.arb = address(new FlashArbExecutor(d.factory, deployer, deployer));
 

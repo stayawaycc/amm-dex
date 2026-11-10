@@ -89,6 +89,7 @@ contract AuditTest is BaseTest {
 
     address internal attacker = makeAddr("attacker");
     address internal profitRecipient = makeAddr("profitRecipient");
+    address internal keeper = makeAddr("keeper");
 
     function setUp() public override {
         super.setUp();
@@ -96,19 +97,22 @@ contract AuditTest is BaseTest {
         pair = _seedPair(address(tokenA), address(tokenB), 10_000e18, 10_000e18);
         _approveAll(alice);
         _approveAll(attacker);
+
+        // The audit probes act as the attacker; hand the keeper role to a neutral party
+        // so the probes run against a gate they do not hold.
+        oracle.setKeeper(keeper);
     }
 
     // =====================================================================
-    // FINDING 1 — TwapOracle: `update` is permissionless and the observation
-    //             table is a single slot, so an unprivileged actor chooses the
-    //             start of every averaging window.
-    //             TwapOracle.sol:43, 59-64, 100-108
+    // FINDING 1 — TwapOracle: `update` used to be permissionless and the
+    //             observation table is a single slot, so an unprivileged actor
+    //             chose the start of every averaging window.
+    //             TwapOracle.sol (keeper state + update gate + StaleWindow bound)
     // =====================================================================
 
-    /// @notice Same size dump, same pool depth, same elapsed time. The only difference is that
-    ///         in the second case the attacker calls `oracle.update` right after the dump.
-    ///         Without the reset the manipulation is diluted 50/50; with the reset it carries
-    ///         100% of the weight, i.e. the attacker gets to publish their own price.
+    /// @notice Same size dump, same pool depth, same elapsed time. Post-fix the attacker cannot
+    ///         re-anchor the window at all, so the manipulation stays diluted by the honest
+    ///         portion of the window — exactly like the control run.
     function test_F1_AttackerOwnsTheAveragingWindow() public {
         // Two identical 1:1 pools so both runs are directly comparable.
         AmmPair control = pair; // A/B
@@ -118,6 +122,7 @@ contract AuditTest is BaseTest {
         uint256 honest = uint256(1) << 112; // 1:1 pool
 
         // ---- Run 1: control, nobody touches the observation ------------------
+        vm.prank(keeper);
         oracle.update(address(control));
         vm.warp(block.timestamp + 600);
         control.sync(); // 600 s of the healthy 1:1 price
@@ -131,7 +136,11 @@ contract AuditTest is BaseTest {
         // 1200 s window, half healthy half crushed -> the honest half dilutes the attack.
         assertApproxEqRel(diluted, (honest + spotControl) / 2, 0.01e18, "control must be the midpoint");
 
-        // ---- Run 2: identical dump, attacker resets the observation ----------
+        // ---- Run 2: identical dump, attacker tries to reset the observation --
+        // Touch the pair first so the keeper's observation anchors at `now`, mirroring
+        // the control run's timeline exactly.
+        attacked.sync();
+        vm.prank(keeper);
         oracle.update(address(attacked));
         vm.warp(block.timestamp + 600);
         attacked.sync();
@@ -139,7 +148,8 @@ contract AuditTest is BaseTest {
 
         _dump(attacked, address(tokenC), 5_000_000e18);
         uint256 spotAttacked = _spot0(attacked);
-        // *** THE ATTACK: one permissionless call re-anchors the window ***
+        // *** THE ATTACK: re-anchoring the window now fails outright ***
+        vm.expectRevert("TwapOracle: FORBIDDEN");
         vm.prank(attacker);
         oracle.update(address(attacked));
         vm.warp(block.timestamp + 600);
@@ -149,49 +159,53 @@ contract AuditTest is BaseTest {
         emit log_named_uint("honest price          ", honest);
         emit log_named_uint("attacker spot price   ", spotAttacked);
         emit log_named_uint("diluted TWAP (control)", diluted);
-        emit log_named_uint("published TWAP (reset)", published);
+        emit log_named_uint("published TWAP (post-fix)", published);
 
-        // The published "average" is exactly the attacker's spot price: zero dilution.
-        assertApproxEqRel(published, spotAttacked, 0.01e18, "reset publishes the attacker's spot price");
-        // Quantify the uplift: same capital, same elapsed time, 1000x+ stronger.
-        assertGt(diluted / published, 1000, "reset must multiply manipulation power");
-        assertLt(published, honest / 100_000, "published price must be far from the true price");
+        // Without the reset the attacker only owns half the window: the published value is
+        // the midpoint, same as the control run.
+        assertApproxEqRel(published, (honest + spotAttacked) / 2, 0.01e18, "reset must not publish attacker's spot");
+        assertGt(published, honest / 100, "the honest half must keep the price far from the attacker's");
     }
 
-    /// @notice The same missing access control is a cheap, repeatable denial of service:
-    ///         one `update` after each pool touch keeps `elapsed` at zero forever.
-    function test_F1b_AnyoneCanKeepConsultRevertingForever() public {
+    /// @notice The missing access control used to be a cheap, repeatable denial of service.
+    ///         Post-fix every hostile poke is refused, so `consult` keeps serving prices.
+    function test_F1b_KeeperGateEndsTheFreeDenialOfService() public {
+        vm.prank(keeper);
         oracle.update(address(pair));
 
         for (uint256 i; i < 4; ++i) {
             vm.warp(block.timestamp + 600);
             pair.sync(); // legitimate pool activity
+            vm.expectRevert("TwapOracle: FORBIDDEN");
             vm.prank(attacker);
-            oracle.update(address(pair)); // attacker re-anchors the window
+            oracle.update(address(pair)); // attacker tries to re-anchor the window
         }
 
-        vm.expectRevert(); // elapsed == 0, every consumer reverts
-        oracle.consult(address(pair), 600);
+        uint256 price = oracle.consult(address(pair), 600);
+        assertApproxEqRel(price, uint256(1) << 112, 0.01e18, "the DoS is closed");
     }
 
-    /// @notice An attacker can also seed an observation for an address that is not a pair at
-    ///         all, or one whose window is arbitrarily old, and nobody can remove it.
+    /// @notice The observation used to be a single slot with no owner, so anyone could
+    ///         overwrite the honest snapshot. Post-fix only the keeper writes it.
     function test_F1c_ObservationIsASingleSlotWithNoOwner() public {
+        vm.prank(keeper);
         oracle.update(address(pair));
         (,, uint32 tsA) = oracle.observations(address(pair));
         assertEq(tsA, block.timestamp);
 
         vm.warp(block.timestamp + 300);
         pair.sync();
+        vm.expectRevert("TwapOracle: FORBIDDEN");
         vm.prank(attacker);
-        oracle.update(address(pair)); // overwrites, no permission needed
+        oracle.update(address(pair)); // overwriting is now refused
         (,, uint32 tsB) = oracle.observations(address(pair));
-        assertEq(tsB, block.timestamp, "attacker overwrote the observation");
-        assertGt(tsB, tsA);
+        assertEq(tsB, tsA, "the observation must be untouched");
 
-        // The honest snapshot is gone; there is no way to read it back.
-        vm.expectRevert();
-        oracle.consult(address(pair), 600);
+        // The honest snapshot survives and the window still elapses for consumers.
+        vm.warp(block.timestamp + 600);
+        pair.sync();
+        uint256 price = oracle.consult(address(pair), 600);
+        assertApproxEqRel(price, uint256(1) << 112, 0.01e18);
     }
 
     // =====================================================================
@@ -205,23 +219,14 @@ contract AuditTest is BaseTest {
         uint256 pairBalance = tokenA.balanceOf(address(pair));
         assertGt(pairBalance, 0);
 
+        // Post-fix: a stranger cannot burn what they do not own.
+        vm.expectRevert("MockERC20: FORBIDDEN");
         vm.prank(attacker);
-        tokenA.burn(address(pair), pairBalance); // no allowance, no auth, no event
+        tokenA.burn(address(pair), pairBalance);
 
-        assertEq(tokenA.balanceOf(address(pair)), 0, "attacker emptied the pool");
+        assertEq(tokenA.balanceOf(address(pair)), pairBalance, "pool balance untouched");
         (uint112 r0,,) = pair.getReserves();
-        assertEq(r0, 10_000e18, "reserves still claim the tokens");
-
-        // The pool is now insolvent: every deposit and every rescue path reverts.
-        vm.expectRevert();
-        pair.skim(bob);
-
-        tokenA.mint(bob, 1_000e18);
-        vm.startPrank(bob);
-        tokenA.approve(address(pair), type(uint256).max);
-        vm.expectRevert(); // balance0 - _reserve0 underflows inside mint()
-        pair.mint(bob);
-        vm.stopPrank();
+        assertEq(uint256(r0), pairBalance, "reserve and balance still agree");
     }
 
     // =====================================================================
@@ -234,7 +239,10 @@ contract AuditTest is BaseTest {
         // A donation on the healthy side that a keeper should be able to recover.
         tokenB.transfer(address(pair), 5e18);
 
-        // The other side drops below its cached reserve (rebase-down, tax, burn, ...).
+        // The other side drops below its cached reserve (rebase-down, tax, ...).
+        // Post-C-1 the pair itself is the only address allowed to burn its own balance,
+        // which is exactly how a rebase-down token would shrink it.
+        vm.prank(address(pair));
         tokenA.burn(address(pair), 1e18);
         (uint112 r0,,) = pair.getReserves();
         assertGt(uint256(r0), tokenA.balanceOf(address(pair)), "deficit established");
@@ -307,10 +315,13 @@ contract AuditTest is BaseTest {
         uint256 donation = 77e18;
         tokenA.transfer(address(arb), donation);
 
+        // Post-fix the reported profit is the executor's own balance delta. The stray
+        // transfer is no longer swept into it and stays in the executor untouched.
         uint256 profit = arb.execute(address(ab), address(bc), address(ca), address(tokenB), 500e18);
 
-        assertGe(profit, donation, "donation is reported as arb profit");
-        assertEq(tokenA.balanceOf(profitRecipient), profit);
+        assertGt(profit, 0, "the arb itself must still be profitable");
+        assertEq(tokenA.balanceOf(profitRecipient), profit, "recipient gets exactly the arb profit");
+        assertEq(tokenA.balanceOf(address(arb)), donation, "donation stays in the executor");
     }
 
     // =====================================================================
@@ -330,17 +341,18 @@ contract AuditTest is BaseTest {
     // =====================================================================
 
     function test_F6_MaxPeriodDoesNotBoundTheActualWindow() public {
+        vm.prank(keeper);
         oracle.update(address(pair));
         vm.warp(block.timestamp + 30 days);
         pair.sync();
 
-        // A consumer asking for 60 s silently receives a 30-day average.
-        uint256 p60 = oracle.consult(address(pair), 60);
-        uint256 p7d = oracle.consult(address(pair), 7 days);
-        assertGt(p60, 0);
-        assertGt(p7d, 0);
-        emit log_named_uint("consult(60s)  -> 30-day average", p60);
-        emit log_named_uint("consult(7days)-> 30-day average", p7d);
+        // Post-fix the *window* is bounded, not just the argument: a 30-day-old
+        // accumulator is refused for every requested period.
+        vm.expectRevert(abi.encodeWithSelector(TwapOracle.StaleWindow.selector, address(pair), uint32(30 days)));
+        oracle.consult(address(pair), 60);
+
+        vm.expectRevert(abi.encodeWithSelector(TwapOracle.StaleWindow.selector, address(pair), uint32(30 days)));
+        oracle.consult(address(pair), 7 days);
     }
 
     // =====================================================================
@@ -351,22 +363,15 @@ contract AuditTest is BaseTest {
 
     function test_F7_AnyContractCanBeRegisteredAsAPriceSource() public {
         FakePair fake = new FakePair();
-        // Attacker registers any contract that implements three getters.
+        // Post-fix a stranger cannot register anything, so a fabricated price source
+        // cannot even get an observation slot.
         fake.set(0, 0);
+        vm.expectRevert("TwapOracle: FORBIDDEN");
         vm.prank(attacker);
         oracle.update(address(fake));
 
-        vm.warp(block.timestamp + 600);
-        // Attacker just rewrites their own accumulator: no pool, no swaps, no capital.
-        uint256 fakePrice = uint256(5) << 112; // "token0 is worth 5 token1"
-        fake.set(fakePrice * 600, 0);
-
-        // A consumer that resolves the address off-chain (or trusts a user-supplied address)
-        // gets a price with no relationship to any real pool.
-        uint256 price = oracle.consult(address(fake), 600);
-        assertEq(price, fakePrice, "oracle serves a fabricated price");
-
-        // There is no factory check anywhere on this path.
+        // The keeper registering an arbitrary address is a deliberate trust decision, not
+        // an attack path; nothing about it changes.
         assertEq(oracle.factory(), address(factory));
         assertTrue(factory.getPair(address(tokenA), address(tokenB)) != address(fake));
     }
@@ -407,22 +412,25 @@ contract AuditTest is BaseTest {
         (uint112 r0,,) = pair.getReserves();
         assertGt(r0, 0);
 
-        // Empty the token0 side without going through the pair's accounting.
-        vm.prank(attacker);
-        tokenA.burn(address(pair), tokenA.balanceOf(address(pair)));
+        // Empty the token0 side. Post-C-1 only the pair itself may burn its own balance,
+        // which models how a rebase-down token would shrink it. The balance read must
+        // happen before the prank: vm.prank applies to the very next call.
+        uint256 pairBal = tokenA.balanceOf(address(pair));
+        vm.prank(address(pair));
+        tokenA.burn(address(pair), pairBal);
 
         pair.sync(); // reserves now claim 0
         (uint112 r0After,,) = pair.getReserves();
         assertEq(r0After, 0, "reserve zeroed");
         assertGt(pair.totalSupply(), 0, "supply still positive");
 
-        // Every future mint reverts with a division by zero, permanently.
+        // Post-L3: the failure is an explicit ZERO_RESERVE error, not an arithmetic panic.
         tokenA.mint(bob, 1_000e18);
         tokenB.mint(bob, 1_000e18);
         vm.startPrank(bob);
         tokenA.transfer(address(pair), 1_000e18);
         tokenB.transfer(address(pair), 1_000e18);
-        vm.expectRevert(stdError.divisionError);
+        vm.expectRevert("AmmPair: ZERO_RESERVE");
         pair.mint(bob);
         vm.stopPrank();
     }

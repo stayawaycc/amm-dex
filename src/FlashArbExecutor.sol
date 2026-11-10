@@ -105,13 +105,18 @@ contract FlashArbExecutor is IAmmCallee, Ownable, ReentrancyGuard {
         bool borrowToken0 = IAmmPair(pairAB).token0() == tokenB;
         bytes memory data = abi.encode(pairBC, pairCA, tokenA);
 
+        // Baseline before the flash swap: anything already sitting here belongs to whoever sent
+        // it, not to the arb. Counting the whole balance as profit paid stray transfers out to
+        // `profitRecipient`; see test/SecurityFixes.t.sol.
+        uint256 balanceBefore = IERC20(tokenA).balanceOf(address(this));
+
         // Take the borrowed token out of the pool: if it is token0, amount0Out carries the loan.
         IAmmPair(pairAB).swap(borrowToken0 ? amountBorrow : 0, borrowToken0 ? 0 : amountBorrow, address(this), data);
 
         activePair = address(0);
         borrowedToken = address(0);
 
-        profit = IERC20(tokenA).balanceOf(address(this));
+        profit = IERC20(tokenA).balanceOf(address(this)) - balanceBefore;
         if (profit == 0) revert Unprofitable();
         if (profit < minProfit) revert InsufficientProfit(profit, minProfit);
 
